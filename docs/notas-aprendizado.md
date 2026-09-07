@@ -95,6 +95,12 @@ Se o lock ficasse preso durante todo o Reconcile (que pode fazer I/O de rede), t
 - **Escopo do CRD: `Cluster`** (`+kubebuilder:resource:scope=Cluster`), não `Namespaced` (default do scaffold). Necessário porque `Namespace` é cluster-scoped, e a regra de Garbage Collector do k8s exige que um objeto cluster-scoped só tenha dono cluster-scoped — sem isso, a OwnerReference Tenant→Namespace não funcionaria pra limpeza automática. Confirmado empiricamente rodando `make manifests` e conferindo `scope: Cluster` no CRD YAML gerado.
 - **Agrupamento por cliente**: campo `spec.clientName` (validado, `Pattern`+`MaxLength`, formato DNS-1123) é a fonte de verdade; uma **label espelhada** (`tenantforge.io/clientName`, escrita/corrigida pelo próprio Reconcile) é o que habilita filtro via `kubectl get tenants -l ...` — apiserver não filtra por campo arbitrário de `spec`, só por label/field selector.
 
+## 11.5. Assunção de escopo do MVP — exposição via HTTP Ingress compartilhado
+
+O `NetworkPolicy` gerado hoje assume que o tráfego externo entra via um `Ingress` HTTP(S) compartilhado (regra de `namespaceSelector` casando o namespace do ingress controller). Isso **não cobre** workloads que precisam de exposição TCP crua (ex: banco de dados, fila) — esse tráfego entra via `Service` tipo `LoadBalancer`/`NodePort`, sem passar pelo namespace do ingress controller, então a regra de liberação simplesmente não se aplica a esse caso.
+
+Importante: o eixo que importa aqui é o **padrão de exposição** (HTTP via ingress compartilhado / TCP direto / só interno), não o **tipo de workload** (Deployment/StatefulSet/Job) — o operator nunca gerencia workload nenhum, só o ambiente (Namespace/Quota/NetworkPolicy/RBAC) ao redor dele. Possível campo futuro: `Spec.ExposureMode: HTTPIngress | TCPDirect | Internal`, mudando a forma da NetworkPolicy gerada. Fica documentado como assunção explícita de escopo do MVP, não bug.
+
 ## 12. Roadmap — soft vs. hard multi-tenancy (trabalhos futuros)
 
 O MVP do TenantForge cobre **isolamento soft**: Namespace + RBAC + NetworkPolicy + ResourceQuota/LimitRange. Todos os tenants compartilham os mesmos nodes — isolamento é só lógico (API/rede/quota), testável inteiramente em `kind` local.
@@ -114,6 +120,55 @@ Testado no cluster `kind` (`kindzin`, já existente no ambiente): `Tenant` → `
 Achado lateral real (não planejado): o cluster `kind` compartilhado já tinha OPA Gatekeeper instalado com uma `K8sRequiredLabels` de outro projeto, exigindo label `istio-injection: enabled` em todo Namespace — bloqueou o primeiro `Create` até adicionar a label. Bom exemplo real de "seu controller precisa sobreviver a outras policies já configuradas no cluster", vale citar na monografia.
 
 **Insight central (bom material pra introdução/motivação do TCC)**: o padrão operator não é uma extensão colada em cima do k8s — é a própria arquitetura interna do k8s. `Deployment controller` (`For(Deployment)`, `Owns(ReplicaSet)`) → `ReplicaSet controller` (`For(ReplicaSet)`, `Owns(Pod)`) é a mesma corrente Reconciler+OwnerReference que `Tenant → Namespace`, só com mais um elo. O `kube-controller-manager` é, arquiteturalmente, o mesmo `Manager` do `cmd/main.go`, só que com dezenas de Reconcilers built-in em vez de um custom.
+
+## 14. Dois pontos que se confundem fácil (corrigidos via quiz de revisão)
+
+- **Escopo cluster do `Tenant` não é regra de RBAC.** RBAC (permissão/verbo/recurso) e Garbage Collector (quem pode ser dono de quem via `ownerReferences`) são sistemas **independentes** do k8s. A regra real: um objeto cluster-scoped (`Namespace`) só aceita um dono cluster-scoped — por isso o `Tenant` precisa ser `scope=Cluster`, não por causa de permissão nenhuma.
+- **`.Owns()` ≠ Garbage Collector.** `.Owns(&corev1.Namespace{})` controla só **o que dispara o seu Reconcile** (roteia eventos do filho de volta pro Reconciler do dono). O GC reage à `ownerReference` carimbada via `SetControllerReference` durante a reconciliação, e funciona **sozinho, no apiserver**, independente do seu Controller estar rodando ou ter `.Owns()` configurado. Ou seja: sem `.Owns()`, deletar o Tenant ainda cascade-deleta o Namespace (GC); só deletar o Namespace direto que não dispara mais nada (falta o `.Owns()` pra rotear esse evento).
+
+## 15. Diagrama — quando cada pedaço do registro do Scheme roda
+
+```mermaid
+sequenceDiagram
+    participant GV as groupversion_info.go
+    participant TT as tenant_types.go (init)
+    participant SB as SchemeBuilder (fila)
+    participant CM as cmd/main.go (init)
+    participant SC as scheme real
+    participant MG as Manager
+
+    Note over GV,TT: Fase 1 — carregamento de pacotes (antes do main rodar)
+    GV->>SB: cria SchemeBuilder, enfileira callback_metav1
+    TT->>SB: SchemeBuilder.Register(callback_Tenant)
+    Note over SB: fila = [callback_metav1, callback_Tenant]<br/>nenhum executado ainda — não existe Scheme real
+
+    Note over CM: Fase 2 — init() do cmd/main.go
+    CM->>SC: scheme := runtime.NewScheme() (nasce vazio)
+    CM->>SB: multitenancyv1alpha1.AddToScheme(scheme)
+    SB->>SC: roda callback_metav1(scheme)
+    SB->>SC: roda callback_Tenant(scheme) → AddKnownTypes(Tenant, TenantList)
+    Note over SC: scheme agora conhece Tenant/TenantList
+
+    Note over CM: Fase 3 — main() executa
+    CM->>MG: ctrl.NewManager(..., Scheme: scheme)
+    Note over MG: Manager recebe o scheme já povoado
+```
+
+Ponto chave: `groupversion_info.go` nunca precisa saber quantos Kinds existem (só monta a fila vazia); cada `_types.go` nunca precisa saber quando o Scheme real vai nascer (só empilha "quando tiver Scheme, faz isso"). É desacoplamento temporal via fila de callbacks — mesma ideia de qualquer fila de mensagens, só que dentro de um processo só.
+
+## 16. Inventário — cada componente que o Manager gerencia (ancorado no `cmd/main.go`)
+
+| Componente | O que faz | Onde aparece |
+|---|---|---|
+| Cache | Sobe Informers sob demanda (por GVK observado), mantém cópia local sincronizada via watch. Client lê daqui. | Interno ao `ctrl.NewManager`, a partir do `Scheme` |
+| Client | Interface que o Reconciler usa (`Get`/`Create`/`Status().Update`). Leitura via Cache, escrita direto no apiserver. | Embutido (`client.Client`) no `TenantReconciler` |
+| Leader Election | Coordena múltiplas réplicas via `Lease` — só o líder reconcilia. | `LeaderElection`/`LeaderElectionID` em `ctrl.Options` |
+| Health checks | `/healthz`/`/readyz` pro kubelet. | `mgr.AddHealthzCheck`/`AddReadyzCheck` |
+| Metrics server | `/metrics` (Prometheus), opcionalmente protegido por auth. | `metricsServerOptions` em `ctrl.Options` |
+| Webhook server | Servidor HTTPS pra admission webhooks — hoje existe mas vazio (nenhum webhook registrado; é peça do roadmap Fase 2). | `webhook.NewServer(...)` em `ctrl.Options` |
+| Signal handler | Graceful shutdown (SIGTERM/SIGINT). | `mgr.Start(ctrl.SetupSignalHandler())` |
+
+Nota: **Scheme não é "gerenciado" pelo Manager** do mesmo jeito — é criado fora (no `init()`) e só entregue via `ctrl.Options{Scheme: scheme}`. Cache e Client são quem de fato *usa* o Scheme continuamente.
 
 ## Próximo passo
 
