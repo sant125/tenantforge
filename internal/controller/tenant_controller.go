@@ -19,26 +19,26 @@ package controller
 import (
 	"context"
 
-	//minha API customizada, pra poder criar e trabalhar com Tenants
+	// minha API customizada, pra poder criar e trabalhar com Tenants
 	multitenancyv1alpha1 "github.com/sant125/tenantforge/api/v1alpha1"
-	//corev1, pra poder criar e trabalhar com Namespaces/Pods/Services/ConfigMaps/Secrets, etc.
+	// corev1, pra poder criar e trabalhar com Namespaces/Pods/Services/ConfigMaps/Secrets, etc.
 	corev1 "k8s.io/api/core/v1"
-	//trampar com o core do networkingv1, netpols, specificamente, pra poder criar NetworkPolicies
+	// trampar com o core do networkingv1, netpols, specificamente, pra poder criar NetworkPolicies
 	networkingv1 "k8s.io/api/networking/v1"
-	//metav1, pra poder criar e trabalhar com ObjectMeta, LabelSelectors, etc.
+	// metav1, pra poder criar e trabalhar com ObjectMeta, LabelSelectors, etc.
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	//runtime, pra poder criar e trabalhar com Schemes, OwnerReferences, etc.
+	// runtime, pra poder criar e trabalhar com Schemes, OwnerReferences, etc.
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	//trampar com controller-runtime, pra poder criar e trabalhar com Controllers, Reconciles, Managers, etc. Usa o client-go por baixo dos panos.
+	// trampar com controller-runtime, pra poder criar e trabalhar com Controllers, Reconciles, Managers, etc. Usa o client-go por baixo dos panos.
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	//interface de log do controller-runtime, pra poder logar mensagens de debug/info/warn/error
+	// interface de log do controller-runtime, pra poder logar mensagens de debug/info/warn/error
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -55,8 +55,7 @@ type TenantReconciler struct {
 // +kubebuilder:rbac:groups=multitenancy.tenantforge.io,resources=tenants/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile garante que existe um Namespace pra cada Tenant, com OwnerReference
-// apontando pro Tenant — deletar o Tenant derruba o Namespace (e tudo dentro dele) em cascata.
+// Reconcile a funcao principal do controller, que é chamada sempre que um Tenant é criado/atualizado/deletado. Ela é responsável por criar/atualizar/deletar os recursos associados ao Tenant (Namespace, NetworkPolicy, ResourceQuota) de acordo com o spec do Tenant.
 func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
