@@ -19,15 +19,26 @@ package controller
 import (
 	"context"
 
+	//minha API customizada, pra poder criar e trabalhar com Tenants
 	multitenancyv1alpha1 "github.com/sant125/tenantforge/api/v1alpha1"
+	//corev1, pra poder criar e trabalhar com Namespaces/Pods/Services/ConfigMaps/Secrets, etc.
 	corev1 "k8s.io/api/core/v1"
+	//trampar com o core do networkingv1, netpols, specificamente, pra poder criar NetworkPolicies
 	networkingv1 "k8s.io/api/networking/v1"
+	//metav1, pra poder criar e trabalhar com ObjectMeta, LabelSelectors, etc.
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	//runtime, pra poder criar e trabalhar com Schemes, OwnerReferences, etc.
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	//trampar com controller-runtime, pra poder criar e trabalhar com Controllers, Reconciles, Managers, etc. Usa o client-go por baixo dos panos.
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	//interface de log do controller-runtime, pra poder logar mensagens de debug/info/warn/error
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -67,8 +78,8 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
 		ns.Labels = map[string]string{
-			"tenantforge.io/clientName": tenant.Spec.ClientName,
-			"istio-injection":           "enabled",
+			"tenantforge.io/tenant": tenant.Name,
+			"istio-injection":       "enabled",
 		}
 		return controllerutil.SetControllerReference(&tenant, ns, r.Scheme)
 	})
@@ -77,6 +88,7 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		log.Error(err, "Failed to create or update Namespace", "Namespace", tenantNamespace)
 		return ctrl.Result{}, err
 	}
+	log.Info("Successfully reconciled Namespace", "Namespace", tenantNamespace, "Result", result)
 
 	if tenant.Spec.NetworkIsolation == multitenancyv1alpha1.NetworkIsolationLevelIsolated {
 		log.Info("Tenant requires network isolation, creating NetworkPolicy", "Tenant", tenant.Name)
@@ -130,6 +142,7 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 
 		result, err = controllerutil.CreateOrUpdate(ctx, r.Client, netpol, func() error {
+			// So defino as specs pós get, pra não perder por sobrescrever oq ja tinha no netpol anteriormente
 			netpol.Spec = networkingv1.NetworkPolicySpec{
 				PodSelector: metav1.LabelSelector{},
 			}
@@ -145,13 +158,46 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			log.Error(err, "Failed to create or update NetworkPolicy", "NetworkPolicy", netpol.Name)
 			return ctrl.Result{}, err
 		}
-
+		log.Info("Successfully reconciled NetworkPolicy", "NetworkPolicy", netpol.Name, "Result", result)
 	} else {
 		log.Info("Tenant does not require network isolation, skipping NetworkPolicy creation", "Tenant", tenant.Name)
-		return ctrl.Result{}, nil
 	}
 
-	log.Info("Successfully reconciled Namespace", "Namespace", tenantNamespace, "Result", result)
+	// Configure ResourceQuota based on TenantTier
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      tenant.Name + "-resource-quota",
+			Namespace: tenantNamespace,
+		},
+	}
+
+	var limit corev1.ResourceList
+	switch tenant.Spec.TenantTier {
+	case multitenancyv1alpha1.TenantTierLarge:
+		limit = corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("4"),
+			corev1.ResourceMemory: resource.MustParse("8Gi"),
+		}
+	case multitenancyv1alpha1.TenantTierMedium:
+		limit = corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("4Gi"),
+		}
+	case multitenancyv1alpha1.TenantTierSmall:
+		limit = corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1"),
+			corev1.ResourceMemory: resource.MustParse("2Gi"),
+		}
+	}
+	result, err = controllerutil.CreateOrUpdate(ctx, r.Client, quota, func() error {
+		quota.Spec.Hard = limit
+		return controllerutil.SetControllerReference(&tenant, quota, r.Scheme)
+	})
+	if err != nil {
+		log.Error(err, "Failed to create or update ResourceQuota for Tenant", "ResourceQuota", quota.Name)
+		return ctrl.Result{}, err
+	}
+	log.Info("Successfully reconciled ResourceQuota", "ResourceQuota", quota.Name, "Result", result)
 	return ctrl.Result{}, nil
 }
 
@@ -160,6 +206,8 @@ func (r *TenantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&multitenancyv1alpha1.Tenant{}).
 		Owns(&corev1.Namespace{}).
+		Owns(&networkingv1.NetworkPolicy{}).
+		Owns(&corev1.ResourceQuota{}).
 		Named("tenant").
 		Complete(r)
 }
