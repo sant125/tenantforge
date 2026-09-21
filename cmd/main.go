@@ -26,6 +26,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -37,6 +38,12 @@ import (
 
 	multitenancyv1alpha1 "github.com/sant125/tenantforge/api/v1alpha1"
 	"github.com/sant125/tenantforge/internal/controller"
+
+	// karpenter modules
+	karpenterapis "sigs.k8s.io/karpenter/pkg/apis"
+	karpenterapisv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -49,6 +56,12 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(multitenancyv1alpha1.AddToScheme(scheme))
+
+	karpenterGV := schema.GroupVersion{Group: karpenterapis.Group, Version: "v1"}
+
+	metav1.AddToGroupVersion(scheme, karpenterGV)
+
+	scheme.AddKnownTypes(karpenterGV, &karpenterapisv1.NodePool{}, &karpenterapisv1.NodePoolList{})
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -61,9 +74,11 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var enableNodePool bool
 	var tlsOpts []func(*tls.Config)
 	// eu
 	var ingressSourceLabelKey, ingressSourceLabelValue string
+	var configMapName, configMapNamespace string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -83,8 +98,14 @@ func main() {
 		"label used to identify the source of the ingress")
 	flag.StringVar(&ingressSourceLabelValue, "ingress-source-label-value", "nginx", "The value of the label"+
 		"used to identify the source of the ingress")
+	flag.StringVar(&configMapName, "config-map-name", "tenantforge-config", "The name of the "+
+		"ConfigMap that contains the configuration for the Tenant controller")
+	flag.StringVar(&configMapNamespace, "config-map-namespace", "tenantforge-system", "The namespace of the "+
+		"ConfigMap that contains the configuration for the Tenant controller")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&enableNodePool, "enable-node-pool", false,
+		"If set, the NodePool controller will be enabled")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -189,6 +210,9 @@ func main() {
 		Scheme:                  mgr.GetScheme(),
 		IngressSourceLabelKey:   ingressSourceLabelKey,
 		IngressSourceLabelValue: ingressSourceLabelValue,
+		ConfigMapName:           configMapName,
+		ConfigMapNamespace:      configMapNamespace,
+		EnableNodePool:          enableNodePool
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "tenant")
 		os.Exit(1)

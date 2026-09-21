@@ -21,6 +21,8 @@ import (
 
 	// minha API customizada, pra poder criar e trabalhar com Tenants
 	multitenancyv1alpha1 "github.com/sant125/tenantforge/api/v1alpha1"
+	"go.yaml.in/yaml/v2"
+
 	// corev1, pra poder criar e trabalhar com Namespaces/Pods/Services/ConfigMaps/Secrets, etc.
 	corev1 "k8s.io/api/core/v1"
 	// trampar com o core do networkingv1, netpols, specificamente, pra poder criar NetworkPolicies
@@ -28,6 +30,7 @@ import (
 	// metav1, pra poder criar e trabalhar com ObjectMeta, LabelSelectors, etc.
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	// runtime, pra poder criar e trabalhar com Schemes, OwnerReferences, etc.
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,9 +40,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	// interface de log do controller-runtime, pra poder logar mensagens de debug/info/warn/error
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	
+	// karpenter modules
+	karpenterv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
 // TenantReconciler reconciles a Tenant object
@@ -48,6 +56,15 @@ type TenantReconciler struct {
 	Scheme                  *runtime.Scheme
 	IngressSourceLabelKey   string
 	IngressSourceLabelValue string
+	ConfigMapName           string
+	ConfigMapNamespace      string
+	EnableNodePool          bool
+}
+
+type TenantReconcilerConfig struct {
+	InstaceTypes []string `yaml:"instanceTypes"`
+	MinSize      int      `yaml:"minSize"`
+	MaxSize      int      `yaml:"maxSize"`
 }
 
 // +kubebuilder:rbac:groups=multitenancy.tenantforge.io,resources=tenants,verbs=get;list;watch;create;update;patch;delete
@@ -60,6 +77,26 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	log := logf.FromContext(ctx)
 
 	log.Info("Reconciling Tenant", "Name", req.NamespacedName)
+
+	var cm corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{Name: r.ConfigMapName, Namespace: r.ConfigMapNamespace}, &cm); err != nil {
+		log.Error(err, "Failed to get ConfigMap", "ConfigMap", r.ConfigMapName)
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	var configs map[string]string
+	if err := yaml.Unmarshal([]byte(cm.Data["config.yaml"]), &configs); err != nil {
+		log.Error(err, "Failed to unmarshal ConfigMap data", "ConfigMap", r.ConfigMapName)
+		return ctrl.Result{}, err
+	}
+	log.Info("Configs loaded from ConfigMap", "Configs", configs)
+
+	if r.EnableNodePool && tenant.Spec.NodePool {
+		// Create or update NodePool for the tenant
+		nodePool := 
+		log.Info("Creating or updating NodePool for Tenant", "Tenant", tenant.Name)
+		if err := controllerutil.CreateOrUpdate()
+	}
 
 	var tenant multitenancyv1alpha1.Tenant
 	if err := r.Get(ctx, req.NamespacedName, &tenant); err != nil {
@@ -207,6 +244,30 @@ func (r *TenantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Namespace{}).
 		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&corev1.ResourceQuota{}).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, a client.Object) []reconcile.Request {
+				if a.GetName() != r.ConfigMapName || a.GetNamespace() != r.ConfigMapNamespace {
+					return []reconcile.Request{}
+				}
+				logf.Log.Info("ConfigMap '" + r.ConfigMapName + "' changed, reconciling all Tenants")
+				// When the ConfigMap changes, we want to reconcile all Tenants
+				var tenantList multitenancyv1alpha1.TenantList
+				if err := r.List(ctx, &tenantList); err != nil {
+					logf.Log.Error(err, "Failed to list Tenants for ConfigMap change")
+					return []reconcile.Request{}
+				}
+				var requests []reconcile.Request
+				for _, tenant := range tenantList.Items {
+					requests = append(requests, reconcile.Request{
+						NamespacedName: types.NamespacedName{
+							Name: tenant.Name,
+						},
+					})
+				}
+				return requests
+			}),
+		).
 		Named("tenant").
 		Complete(r)
 }

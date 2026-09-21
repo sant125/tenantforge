@@ -1,0 +1,11 @@
+apiVersion: multitenancy.tenantforge.io/v1alpha1
+kind: Tenant
+metadata:
+  labels:
+    app.kubernetes.io/name: operatorzin
+    app.kubernetes.io/managed-by: kustomize
+  name: dudu-prod-uemg
+spec:
+  clientName: dudu-prod-uemg
+  tier: Medium
+  networkIsolation: Isolated

@@ -47,6 +47,10 @@ type TenantSpec struct {
 	// garanto que o formato do campo spec.clientName seja compatível com o formato de nomes de recursos do Kubernetes, que é um DNS subdomain name.
 	ClientName string `json:"clientName"`
 
+	// nodePool define se o tenant terá um NodePool dedicado ou não
+	// +kubebuilder:validation:Optional
+	NodePool bool `json:"nodePool,omitempty"`
+
 	// tier define o nível de serviço do tenant, que pode ser "Small", "Medium" ou "Large".
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=Small;Medium;Large
