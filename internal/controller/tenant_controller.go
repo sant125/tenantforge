@@ -40,14 +40,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	// interface de log do controller-runtime, pra poder logar mensagens de debug/info/warn/error
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	
 	// karpenter modules
-	karpenterv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+
+	karpenterapisv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
 // TenantReconciler reconciles a Tenant object
@@ -59,18 +57,36 @@ type TenantReconciler struct {
 	ConfigMapName           string
 	ConfigMapNamespace      string
 	EnableNodePool          bool
+	// NodePoolProvisioner é quem sabe provisionar o node pool de cada tenant.
+	// Definida em nodepool_provisioner.go - ver o comentário lá pro porquê de
+	// ser uma interface e não a chamada direta ao Karpenter.
+	NodePoolProvisioner NodePoolProvisioner
 }
 
+// TenantReconcilerConfig é o config.yaml carregado da ConfigMap. O NodeClassRef fica
+// inteiro na config pra não acoplar o controller a nenhum cloud provider especifico -
+// quem roda em AWS bota Kind: "EC2NodeClass"/Group: "karpenter.k8s.aws", quem tiver um
+// NodeClass próprio pro kind bota o dele, o controller não sabe a diferença.
 type TenantReconcilerConfig struct {
-	InstaceTypes []string `yaml:"instanceTypes"`
-	MinSize      int      `yaml:"minSize"`
-	MaxSize      int      `yaml:"maxSize"`
+	NodePool NodePoolConfig `yaml:"nodePool"`
+}
+
+type NodePoolConfig struct {
+	NodeClassGroup string   `yaml:"nodeClassGroup"`
+	NodeClassKind  string   `yaml:"nodeClassKind"`
+	NodeClassName  string   `yaml:"nodeClassName"`
+	InstanceTypes  []string `yaml:"instanceTypes"`
+	MaxNodes       int      `yaml:"maxNodes"`
 }
 
 // +kubebuilder:rbac:groups=multitenancy.tenantforge.io,resources=tenants,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=multitenancy.tenantforge.io,resources=tenants/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=multitenancy.tenantforge.io,resources=tenants/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=karpenter.sh,resources=nodepools,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile a funcao principal do controller, que é chamada sempre que um Tenant é criado/atualizado/deletado. Ela é responsável por criar/atualizar/deletar os recursos associados ao Tenant (Namespace, NetworkPolicy, ResourceQuota) de acordo com o spec do Tenant.
 func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -84,19 +100,12 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	var configs map[string]string
-	if err := yaml.Unmarshal([]byte(cm.Data["config.yaml"]), &configs); err != nil {
+	var cfg TenantReconcilerConfig
+	if err := yaml.Unmarshal([]byte(cm.Data["config.yaml"]), &cfg); err != nil {
 		log.Error(err, "Failed to unmarshal ConfigMap data", "ConfigMap", r.ConfigMapName)
 		return ctrl.Result{}, err
 	}
-	log.Info("Configs loaded from ConfigMap", "Configs", configs)
-
-	if r.EnableNodePool && tenant.Spec.NodePool {
-		// Create or update NodePool for the tenant
-		nodePool := 
-		log.Info("Creating or updating NodePool for Tenant", "Tenant", tenant.Name)
-		if err := controllerutil.CreateOrUpdate()
-	}
+	log.Info("Configs loaded from ConfigMap", "Config", cfg)
 
 	var tenant multitenancyv1alpha1.Tenant
 	if err := r.Get(ctx, req.NamespacedName, &tenant); err != nil {
@@ -105,6 +114,12 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	tenantNamespace := tenant.Name
+
+	if r.EnableNodePool && tenant.Spec.NodePool {
+		if err := r.NodePoolProvisioner.Reconcile(ctx, &tenant, cfg.NodePool); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
@@ -244,30 +259,7 @@ func (r *TenantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Namespace{}).
 		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&corev1.ResourceQuota{}).
-		Watches(
-			&corev1.ConfigMap{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, a client.Object) []reconcile.Request {
-				if a.GetName() != r.ConfigMapName || a.GetNamespace() != r.ConfigMapNamespace {
-					return []reconcile.Request{}
-				}
-				logf.Log.Info("ConfigMap '" + r.ConfigMapName + "' changed, reconciling all Tenants")
-				// When the ConfigMap changes, we want to reconcile all Tenants
-				var tenantList multitenancyv1alpha1.TenantList
-				if err := r.List(ctx, &tenantList); err != nil {
-					logf.Log.Error(err, "Failed to list Tenants for ConfigMap change")
-					return []reconcile.Request{}
-				}
-				var requests []reconcile.Request
-				for _, tenant := range tenantList.Items {
-					requests = append(requests, reconcile.Request{
-						NamespacedName: types.NamespacedName{
-							Name: tenant.Name,
-						},
-					})
-				}
-				return requests
-			}),
-		).
+		Owns(&karpenterapisv1.NodePool{}).
 		Named("tenant").
 		Complete(r)
 }

@@ -1,0 +1,39 @@
+# Exemplo de ConfigMap consumida pelo TenantReconciler (ver ConfigMapName/
+# ConfigMapNamespace nas flags do manager, cmd/main.go). O reconciler faz
+# yaml.Unmarshal de Data["config.yaml"] direto pra TenantReconcilerConfig.
+#
+# Esse exemplo usa o provider kwok - é o provider fake que o próprio projeto
+# Karpenter mantém pra dar pra testar NodePool sem precisar de conta em nenhuma
+# cloud, só num kind. Precisa instalar o controller + CRDs do kwok no cluster
+# antes (não é esse operator que instala): ver `make install-kwok` no repo do
+# karpenter (sigs.k8s.io/karpenter), ou o chart em kwok/charts.
+#
+# Trocando pra rodar numa cloud de verdade, essas 3 linhas mudam e nada mais no
+# código do controller precisa mudar:
+#   AWS:   nodeClassGroup: karpenter.k8s.aws   nodeClassKind: EC2NodeClass
+#   Azure: nodeClassGroup: karpenter.azure.com nodeClassKind: AKSNodeClass
+#
+# O NodeClass referenciado (nodeClassName) precisa já existir no cluster -
+# esse operator só cria o NodePool, não o NodeClass.
+#
+# instanceTypes tem que bater com o catálogo do provider em uso. "t3.medium"/
+# "t3.large" são nomes da AWS de verdade - não existem no kwok, e o Karpenter
+# simplesmente filtra tudo e nunca provisiona nada (visto na prática: pod fica
+# Pending pra sempre, log do Karpenter diz "nodepool requirements filtered out
+# all available instance types"). O catálogo fake do kwok usa nomes tipo
+# "c-2x-amd64-linux"/"c-4x-amd64-linux" (confirmados rodando de verdade).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenantforge-config
+  namespace: tenantforge-system
+data:
+  config.yaml: |
+    nodePool:
+      nodeClassGroup: karpenter.kwok.sh
+      nodeClassKind: KWOKNodeClass
+      nodeClassName: default
+      instanceTypes:
+        - c-2x-amd64-linux
+        - c-4x-amd64-linux
+      maxNodes: 5

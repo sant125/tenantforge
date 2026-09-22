@@ -1,0 +1,23 @@
+resources:
+- manifests.yaml
+- service.yaml
+
+#sem isso aq, meu controller morto, criei uma dependencia circular na subida do proprio manager|
+#onde precisava do meu mutating webhook vivo para avaliar o pod(fail mode)
+patches:
+- target:
+    kind: MutatingWebhookConfiguration
+    name: mutating-webhook-configuration
+  patch: |-
+    - op: add
+      path: /webhooks/0/namespaceSelector
+      value:
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+          - operatorzin-system
+          - kube-system
+          - kube-node-lease
+          - kube-public
+          - cert-manager

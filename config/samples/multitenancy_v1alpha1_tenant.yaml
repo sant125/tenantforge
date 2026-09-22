@@ -9,3 +9,4 @@ spec:
   clientName: sample-client
   tier: Small
   networkIsolation: Open
+  nodePool: true

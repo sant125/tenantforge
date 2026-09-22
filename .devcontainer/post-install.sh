@@ -72,6 +72,33 @@ if ! command -v kubebuilder &> /dev/null; then
   echo "kubebuilder installed successfully"
 fi
 
+# Install yq (mikefarah/yq, o binario Go - varios Makefiles de projetos externos
+# que a gente builda localmente, tipo o do Karpenter (make verify/apply-with-kind),
+# dependem dele pra validar/editar CRDs em yaml)
+if ! command -v yq &> /dev/null; then
+  echo "Installing yq..."
+  curl -Lo /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}"
+  chmod +x /usr/local/bin/yq
+  echo "yq installed successfully"
+fi
+
+# Install helm - o Makefile do Karpenter usa pra subir o chart do provider kwok
+# (make apply-with-kind, via `make install-karpenter-kwok` no nosso Makefile)
+if ! command -v helm &> /dev/null; then
+  echo "Installing helm..."
+  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  echo "helm installed successfully"
+fi
+
+# Install ko - builda a imagem do controller do Karpenter (provider kwok) direto
+# a partir do source Go e, com KO_DOCKER_REPO=kind.local, já carrega no node do
+# kind sem precisar de registry nenhum (usado no mesmo `make install-karpenter-kwok`)
+if ! command -v ko &> /dev/null; then
+  echo "Installing ko..."
+  GOBIN=/usr/local/bin go install github.com/google/ko@latest
+  echo "ko installed successfully"
+fi
+
 # Generate kubebuilder bash completion
 if command -v kubebuilder &> /dev/null; then
   if kubebuilder completion bash > "${BASH_COMPLETIONS_DIR}/kubebuilder" 2>/dev/null; then
@@ -142,6 +169,9 @@ echo "------------------------------------"
 kind version
 kubebuilder version
 kubectl version --client
+yq --version
+helm version
+ko version
 docker --version
 go version
 

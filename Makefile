@@ -106,6 +106,49 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
 
+##@ NodePool (Karpenter kwok, teste local sem cloud)
+
+# Versão clonada é a mesma pinada no go.mod, pra manter o kwok e as CRDs
+# (karpenter.sh_nodepools.yaml etc.) compatíveis com o que o operator importa
+# em código (ver internal/controller/nodepool_provisioner.go).
+KARPENTER_VERSION ?= $(call gomodver,sigs.k8s.io/karpenter)
+KARPENTER_SRC ?= $(LOCALBIN)/karpenter-src
+KIND_CONTEXT ?= kind-$(KIND_CLUSTER)
+
+.PHONY: karpenter-src
+karpenter-src: $(LOCALBIN) ## Clona o repo do Karpenter (mesma versão do go.mod) pra buildar o provider kwok.
+	@if [ -d "$(KARPENTER_SRC)" ]; then \
+		echo "Karpenter source já está em $(KARPENTER_SRC) (apague a pasta pra reclonar)"; \
+	else \
+		git clone --branch "$(KARPENTER_VERSION)" --depth 1 https://github.com/kubernetes-sigs/karpenter "$(KARPENTER_SRC)"; \
+	fi
+
+.PHONY: install-karpenter-kwok
+install-karpenter-kwok: setup-test-e2e karpenter-src ## Builda e instala o Karpenter (provider kwok, sem cloud nenhuma) no Kind de teste.
+	"$(KUBECTL)" config use-context "$(KIND_CONTEXT)"
+	cd "$(KARPENTER_SRC)" && KWOK_REPO=kind.local KIND_CLUSTER_NAME=$(KIND_CLUSTER) $(MAKE) apply-with-kind
+
+.PHONY: install-kwok-simulator
+install-kwok-simulator: setup-test-e2e karpenter-src ## Instala o kubernetes-sigs/kwok em si - sem isso, os nodes fake que o Karpenter cria nunca viram Ready.
+	"$(KUBECTL)" config use-context "$(KIND_CONTEXT)"
+	cd "$(KARPENTER_SRC)" && $(MAKE) install-kwok
+
+.PHONY: apply-nodepool-fixtures
+apply-nodepool-fixtures: ## Aplica o KWOKNodeClass "default" e a ConfigMap de exemplo (config/samples).
+	@printf 'apiVersion: karpenter.kwok.sh/v1alpha1\nkind: KWOKNodeClass\nmetadata:\n  name: default\n' | \
+		"$(KUBECTL)" --context "$(KIND_CONTEXT)" apply -f -
+	"$(KUBECTL)" --context "$(KIND_CONTEXT)" create namespace tenantforge-system --dry-run=client -o yaml | \
+		"$(KUBECTL)" --context "$(KIND_CONTEXT)" apply -f -
+	"$(KUBECTL)" --context "$(KIND_CONTEXT)" apply -f config/samples/tenantforge-config.yaml
+
+.PHONY: setup-nodepool-test
+setup-nodepool-test: install-karpenter-kwok install-kwok-simulator apply-nodepool-fixtures ## Deixa o Kind pronto pra testar --enable-node-pool (kwok + NodeClass + ConfigMap).
+	@echo ""
+	@echo "Cluster '$(KIND_CLUSTER)' pronto pra testar NodePool."
+	@echo "kubectl config use-context $(KIND_CONTEXT)"
+	@echo "make install"
+	@echo "make run ARGS='--enable-node-pool --config-map-name=tenantforge-config --config-map-namespace=tenantforge-system'"
+
 ##@ Build
 
 .PHONY: build
@@ -113,8 +156,8 @@ build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
 .PHONY: run
-run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+run: manifests generate fmt vet ## Run a controller from your host. Pass extra flags with ARGS="...".
+	go run ./cmd/main.go $(ARGS)
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

@@ -1,0 +1,69 @@
+# Template de teste manual pra confirmar que Karpenter + kwok tão funcionando
+# no Kind (ver `make setup-nodepool-test`). Não depende de nenhum Tenant do
+# tenantforge - é só pra provar que o Karpenter provisiona node fake sozinho.
+#
+# Uso:
+#   kubectl apply -f config/samples/kwok-smoke-test.yaml
+#   kubectl get pods -l app=kwok-smoke-test -w      # observa sair de Pending -> Running
+#   kubectl get nodes -w                            # observa o node fake aparecer e ficar Ready
+#   kubectl get nodeclaims
+#
+# Limpeza (o Karpenter derruba o node fake sozinho ao deletar o NodePool, via
+# cascade de owner reference no NodeClaim):
+#   kubectl delete -f config/samples/kwok-smoke-test.yaml
+apiVersion: karpenter.kwok.sh/v1alpha1
+kind: KWOKNodeClass
+metadata:
+  name: smoke-test
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: smoke-test
+spec:
+  template:
+    spec:
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+      nodeClassRef:
+        name: smoke-test
+        kind: KWOKNodeClass
+        group: karpenter.kwok.sh
+      expireAfter: 720h
+  limits:
+    cpu: 100
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kwok-smoke-test
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: kwok-smoke-test
+  template:
+    metadata:
+      labels:
+        app: kwok-smoke-test
+    spec:
+      # Só node provisionado pelo NodePool "smoke-test" serve - o node real do
+      # kind não tem esse label, então o pod fica Pending até o Karpenter reagir.
+      # Não precisa taintar o node real (diferença do teste manual anterior).
+      nodeSelector:
+        karpenter.sh/nodepool: smoke-test
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"

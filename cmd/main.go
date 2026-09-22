@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -44,6 +45,8 @@ import (
 	karpenterapisv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	webhookv1 "github.com/sant125/tenantforge/internal/webhook/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -75,6 +78,8 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var enableNodePool bool
+	var nodePoolProvider string
+	var webhookPort int
 	var tlsOpts []func(*tls.Config)
 	// eu
 	var ingressSourceLabelKey, ingressSourceLabelValue string
@@ -106,6 +111,9 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.BoolVar(&enableNodePool, "enable-node-pool", false,
 		"If set, the NodePool controller will be enabled")
+	flag.StringVar(&nodePoolProvider, "node-pool-provider", "karpenter", "Which NodePoolProvisioner "+
+		"implementation to build when --enable-node-pool is set. Supported values: karpenter")
+	flag.IntVar(&webhookPort, "webhook-port", 9443, "Que porta o webhook escutan pain?")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -133,6 +141,7 @@ func main() {
 	webhookTLSOpts := tlsOpts
 	webhookServerOptions := webhook.Options{
 		TLSOpts: webhookTLSOpts,
+		Port:    webhookPort,
 	}
 
 	if len(webhookCertPath) > 0 {
@@ -205,6 +214,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Só monta o provisioner se o NodePool controller tiver habilitado - com
+	// enableNodePool=false a flag --node-pool-provider é irrelevante, não faz
+	// sentido travar o start do manager por causa de um valor nela.
+	var nodePoolProvisioner controller.NodePoolProvisioner
+	if enableNodePool {
+		nodePoolProvisioner, err = newNodePoolProvisioner(nodePoolProvider, mgr)
+		if err != nil {
+			setupLog.Error(err, "Failed to configure NodePool provisioner", "node-pool-provider", nodePoolProvider)
+			os.Exit(1)
+		}
+	}
+
 	if err := (&controller.TenantReconciler{
 		Client:                  mgr.GetClient(),
 		Scheme:                  mgr.GetScheme(),
@@ -212,10 +233,18 @@ func main() {
 		IngressSourceLabelValue: ingressSourceLabelValue,
 		ConfigMapName:           configMapName,
 		ConfigMapNamespace:      configMapNamespace,
-		EnableNodePool:          enableNodePool
+		EnableNodePool:          enableNodePool,
+		NodePoolProvisioner:     nodePoolProvisioner,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "tenant")
 		os.Exit(1)
+	}
+	// nolint:goconst
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err := webhookv1.SetupPodWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create webhook", "webhook", "Pod")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 
@@ -232,5 +261,22 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
+	}
+}
+
+// newNodePoolProvisioner resolve a flag --node-pool-provider pra implementação
+// de controller.NodePoolProvisioner correspondente. É o único lugar do projeto
+// que conhece os nomes de provider disponíveis - suportar um novo (ex.: "gke")
+// é só somar um case aqui apontando pra implementação nova; nada em
+// internal/controller/tenant_controller.go muda.
+func newNodePoolProvisioner(provider string, mgr ctrl.Manager) (controller.NodePoolProvisioner, error) {
+	switch provider {
+	case "karpenter":
+		return &controller.KarpenterNodePoolProvisioner{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown node pool provider %q (supported: karpenter)", provider)
 	}
 }
